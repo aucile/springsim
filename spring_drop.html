@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mass Dropped on a Spring</title>
+    <style>
+      :root {
+        --bg: #10141a;
+        --panel: #1a2029;
+        --fg: #e6e9ee;
+        --mute: #8a94a3;
+        --acc: #4cc2ff;
+        --warn: #ffb454;
+        --grid: #2a323e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          14px/1.4 system-ui,
+          sans-serif;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0;
+        padding: 14px 16px 0;
+      }
+      main {
+        display: grid;
+        grid-template-columns: 280px 1fr 1fr;
+        gap: 12px;
+        padding: 12px 16px 16px;
+        height: calc(100vh - 48px);
+        min-height: 520px;
+      }
+      .panel {
+        background: var(--panel);
+        border-radius: 8px;
+        padding: 12px;
+      }
+      .controls label {
+        display: block;
+        margin-top: 10px;
+        color: var(--mute);
+      }
+      .controls label span {
+        color: var(--fg);
+        float: right;
+        font-variant-numeric: tabular-nums;
+      }
+      input[type="range"] {
+        width: 100%;
+        accent-color: var(--acc);
+      }
+      .btns {
+        display: flex;
+        gap: 8px;
+        margin-top: 14px;
+      }
+      button {
+        flex: 1;
+        background: var(--acc);
+        color: #06121a;
+        border: 0;
+        border-radius: 6px;
+        padding: 8px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.alt {
+        background: #2c3542;
+        color: var(--fg);
+      }
+      .readout {
+        margin-top: 14px;
+        border-top: 1px solid var(--grid);
+        padding-top: 10px;
+        font-variant-numeric: tabular-nums;
+      }
+      .readout div {
+        display: flex;
+        justify-content: space-between;
+        padding: 2px 0;
+      }
+      .readout b {
+        color: var(--acc);
+        font-weight: 600;
+      }
+      .right {
+        display: grid;
+        grid-template-rows: 1fr 1fr;
+        gap: 12px;
+        grid-column: 3;
+      }
+      canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .cv {
+        padding: 0;
+        overflow: hidden;
+        min-height: 0;
+      }
+      @media (max-width: 900px) {
+        main {
+          grid-template-columns: 1fr;
+          height: auto;
+        }
+        .right {
+          grid-column: auto;
+        }
+        .cv {
+          height: 420px;
+        }
+        .right .cv {
+          height: 260px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Mass dropped onto a spring</h1>
+    <main>
+      <section class="panel controls">
+        <label
+          >Mass m <span id="vm"></span
+          ><input id="m" type="range" min="0.1" max="10" step="0.1" value="1"
+        /></label>
+        <label
+          >Spring constant k <span id="vk"></span
+          ><input id="k" type="range" min="10" max="2000" step="10" value="200"
+        /></label>
+        <label
+          >Drop height h <span id="vh"></span
+          ><input id="h" type="range" min="0" max="5" step="0.05" value="2"
+        /></label>
+        <label
+          >Gravity g <span id="vg"></span
+          ><input id="g" type="range" min="1" max="25" step="0.1" value="9.81"
+        /></label>
+        <label
+          >Sim speed <span id="vs"></span
+          ><input id="s" type="range" min="0.1" max="2" step="0.1" value="1"
+        /></label>
+        <div class="btns">
+          <button id="play">Pause</button>
+          <button id="reset" class="alt">Reset</button>
+        </div>
+        <div class="readout">
+          <div>Time <b id="rt"></b></div>
+          <div>Height of mass <b id="ry"></b></div>
+          <div>Velocity <b id="rv"></b></div>
+          <div>Impact speed √(2gh) <b id="ri"></b></div>
+          <div>Max compression (predicted) <b id="rx"></b></div>
+          <div>Max compression (observed) <b id="ro"></b></div>
+          <div>Equilibrium mg/k <b id="re"></b></div>
+          <div>Contact time per bounce <b id="rc"></b></div>
+          <div>Bounce period <b id="rp"></b></div>
+        </div>
+      </section>
+
+      <section class="panel cv"><canvas id="scene"></canvas></section>
+
+      <div class="right">
+        <section class="panel cv"><canvas id="plot"></canvas></section>
+        <section class="panel cv"><canvas id="energy"></canvas></section>
+      </div>
+    </main>
+
+    <script>
+      "use strict";
+      const BLOCK_PX = 36; // drawn block height (px)
+      const DT = 0.0005; // physics step (s)
+      const SAMPLE_EVERY = 10; // record a plot point every 10 steps (5 ms)
+      const WIN = 6; // plot time window (s)
+      const $ = (id) => document.getElementById(id);
+
+      // y = height of the mass's bottom above the spring's top at natural length (m); h is the initial y.
+      // The mass is NOT attached: the massless spring pushes only while compressed (y<0),
+      // so the mass leaves it at y=0 and flies back up.
+      // The spring is ideal (no length in the physics); L is its drawn natural length,
+      // sized so the predicted maximum compression always fits on screen.
+      let p,
+        st,
+        hist,
+        maxComp,
+        xmax,
+        L,
+        acc = 0,
+        running = true,
+        last = 0;
+
+      function readParams() {
+        p = {
+          m: +$("m").value,
+          k: +$("k").value,
+          h: +$("h").value,
+          g: +$("g").value,
+          s: +$("s").value,
+        };
+        $("vm").textContent = p.m.toFixed(1) + " kg";
+        $("vk").textContent = p.k + " N/m";
+        $("vh").textContent = p.h.toFixed(2) + " m";
+        $("vg").textContent = p.g.toFixed(1) + " m/s²";
+        $("vs").textContent = p.s.toFixed(1) + "×";
+      }
+
+      function reset() {
+        readParams();
+        st = { t: 0, y: p.h, v: 0, n: 0 };
+        hist = [[0, p.h]];
+        maxComp = 0;
+        acc = 0;
+        const mg = p.m * p.g;
+        const xeq = mg / p.k;
+        xmax = (mg + Math.sqrt(mg * mg + 2 * p.k * mg * p.h)) / p.k;
+        L = Math.max(1, 1.25 * xmax);
+        // Contact phase is SHM about xeq with amplitude A = xmax - xeq; the mass is on the
+        // spring while compression > 0, i.e. a phase span of pi + 2*asin(xeq/A).
+        const A = xmax - xeq;
+        const contact =
+          (Math.PI + 2 * Math.asin(Math.min(1, xeq / A))) /
+          Math.sqrt(p.k / p.m);
+        const flight = 2 * Math.sqrt((2 * p.h) / p.g);
+        $("rx").textContent = xmax.toFixed(3) + " m";
+        $("ri").textContent = Math.sqrt(2 * p.g * p.h).toFixed(2) + " m/s";
+        $("re").textContent = xeq.toFixed(3) + " m";
+        $("rc").textContent = contact.toFixed(3) + " s";
+        $("rp").textContent = (contact + flight).toFixed(3) + " s";
+      }
+
+      function accel(y, v) {
+        let a = -p.g;
+        if (y < 0) a += (-p.k * y) / p.m; // spring pushes only while pressed (y<0)
+        return a;
+      }
+
+      function step() {
+        // semi-implicit Euler: stable for oscillators at this DT
+        st.v += accel(st.y, st.v) * DT;
+        st.y += st.v * DT;
+        st.t += DT;
+        st.n++;
+        if (-st.y > maxComp) maxComp = -st.y;
+        if (st.n % SAMPLE_EVERY === 0) hist.push([st.t, st.y]);
+      }
+
+      function energies() {
+        const ke = 0.5 * p.m * st.v * st.v;
+        const ug = p.m * p.g * (st.y - 0); // reference: spring top
+        const us = st.y < 0 ? 0.5 * p.k * st.y * st.y : 0;
+        return { ke, ug, us, tot: ke + ug + us };
+      }
+
+      // ---------- canvas helpers ----------
+      function fit(cv) {
+        const r = cv.getBoundingClientRect(),
+          d = window.devicePixelRatio || 1;
+        if (
+          cv.width !== Math.round(r.width * d) ||
+          cv.height !== Math.round(r.height * d)
+        ) {
+          cv.width = Math.round(r.width * d);
+          cv.height = Math.round(r.height * d);
+        }
+        const ctx = cv.getContext("2d");
+        ctx.setTransform(d, 0, 0, d, 0, 0);
+        return { ctx, w: r.width, h: r.height };
+      }
+      const css = (n) =>
+        getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+      function drawScene() {
+        const { ctx, w, h } = fit($("scene"));
+        ctx.clearRect(0, 0, w, h);
+        // world spans [-L, h]; pixel padding leaves room for the block above and floor below
+        const top = p.h,
+          bot = -L,
+          padT = BLOCK_PX + 24,
+          padB = 20;
+        const sc = (h - padT - padB) / (top - bot);
+        const X = w / 2,
+          Y = (y) => padT + (top - y) * sc;
+
+        // height ruler: 1/2/5 x 10^n spacing, about 8 lines
+        ctx.strokeStyle = css("--grid");
+        ctx.fillStyle = css("--mute");
+        ctx.font = "11px system-ui";
+        ctx.lineWidth = 1;
+        const raw = (top - bot) / 8,
+          mag = 10 ** Math.floor(Math.log10(raw)),
+          stepM = [1, 2, 5, 10].map((f) => f * mag).find((s) => s >= raw),
+          dec = Math.max(0, -Math.floor(Math.log10(stepM)));
+        for (let i = Math.ceil(bot / stepM); i * stepM <= top + 1e-9; i++) {
+          const v = i * stepM;
+          ctx.beginPath();
+          ctx.moveTo(36, Y(v));
+          ctx.lineTo(w, Y(v));
+          ctx.stroke();
+          ctx.fillText(v.toFixed(dec) + " m", 4, Y(v) - 2);
+        }
+        // natural-length line
+        ctx.strokeStyle = css("--warn");
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(36, Y(0));
+        ctx.lineTo(w, Y(0));
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // floor
+        ctx.fillStyle = "#3a4452";
+        ctx.fillRect(X - 70, Y(-L), 140, 8);
+
+        // spring: zigzag from floor to mass bottom
+        const yb = Y(-L),
+          ys = Y(Math.min(st.y, 0)),
+          yt = Y(st.y);
+        const coils = 12,
+          amp = 22;
+        ctx.strokeStyle = css("--acc");
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(X, yb);
+        const seg = (yb - ys) / (coils * 2 + 2);
+        ctx.lineTo(X, yb - seg);
+        for (let i = 0; i < coils * 2; i++)
+          ctx.lineTo(X + (i % 2 ? -amp : amp), yb - seg * (i + 1.5));
+        ctx.lineTo(X, ys);
+        ctx.stroke();
+
+        // mass block (size grows gently with m)
+        const bw = 40 + 6 * Math.cbrt(p.m) * 3;
+        ctx.fillStyle = "#e6e9ee";
+        ctx.fillRect(X - bw / 2, yt - BLOCK_PX, bw, BLOCK_PX);
+        ctx.fillStyle = "#10141a";
+        ctx.font = "bold 12px system-ui";
+        ctx.textAlign = "center";
+        ctx.fillText(p.m.toFixed(1) + " kg", X, yt - BLOCK_PX / 2 + 4);
+        ctx.textAlign = "left";
+
+        // drop-height marker
+        ctx.fillStyle = css("--mute");
+        ctx.fillText(
+          "h = " + p.h.toFixed(2) + " m",
+          X + bw / 2 + 8,
+          Y(p.h) - 2,
+        );
+      }
+
+      function plotAxes(ctx, w, h, title, xr, yr, pad) {
+        ctx.fillStyle = css("--mute");
+        ctx.font = "12px system-ui";
+        ctx.fillText(title, pad.l, 16);
+        ctx.strokeStyle = css("--grid");
+        ctx.lineWidth = 1;
+        const X = (t) =>
+          pad.l + ((t - xr[0]) / (xr[1] - xr[0])) * (w - pad.l - pad.r);
+        const Y = (v) =>
+          h - pad.b - ((v - yr[0]) / (yr[1] - yr[0])) * (h - pad.t - pad.b);
+        for (let i = 0; i <= 4; i++) {
+          const v = yr[0] + ((yr[1] - yr[0]) * i) / 4;
+          ctx.beginPath();
+          ctx.moveTo(pad.l, Y(v));
+          ctx.lineTo(w - pad.r, Y(v));
+          ctx.stroke();
+          ctx.fillText(v.toFixed(2), 4, Y(v) + 4);
+        }
+        if (yr[0] < 0 && yr[1] > 0) {
+          ctx.strokeStyle = css("--warn");
+          ctx.beginPath();
+          ctx.moveTo(pad.l, Y(0));
+          ctx.lineTo(w - pad.r, Y(0));
+          ctx.stroke();
+        }
+        for (let i = 0; i <= 4; i++) {
+          const t = xr[0] + ((xr[1] - xr[0]) * i) / 4;
+          ctx.fillText(t.toFixed(1) + "s", X(t) - 10, h - 6);
+        }
+        return { X, Y };
+      }
+
+      function drawPlot() {
+        const { ctx, w, h } = fit($("plot"));
+        ctx.clearRect(0, 0, w, h);
+        const t1 = Math.max(WIN, st.t),
+          t0 = t1 - WIN;
+        // fixed range from the predicted extremes: y spans [-xmax, h]
+        const ylo = -xmax * 1.1,
+          yhi = Math.max(p.h, 0.1 * xmax) * 1.05;
+        const { X, Y } = plotAxes(
+          ctx,
+          w,
+          h,
+          "Height of mass above spring top (m)",
+          [t0, t1],
+          [ylo, yhi],
+          { l: 44, r: 10, t: 24, b: 22 },
+        );
+        ctx.strokeStyle = css("--acc");
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        let started = false;
+        for (const q of hist) {
+          if (q[0] < t0) continue;
+          started
+            ? ctx.lineTo(X(q[0]), Y(q[1]))
+            : (ctx.moveTo(X(q[0]), Y(q[1])), (started = true));
+        }
+        ctx.stroke();
+      }
+
+      function drawEnergy() {
+        const { ctx, w, h } = fit($("energy"));
+        ctx.clearRect(0, 0, w, h);
+        const e = energies(),
+          mg = p.m * p.g;
+        const bars = [
+          ["Kinetic", e.ke, "#4cc2ff"],
+          ["Gravitational", e.ug, "#7bd88f"],
+          ["Spring", e.us, "#ff7a90"],
+          ["Total", e.tot, "#e6e9ee"],
+        ];
+        // fixed range: gravity PE bottoms at -mg*xmax; spring PE peaks at mg*(h + xmax)
+        const lo = -mg * xmax,
+          hi = mg * (p.h + xmax);
+        const pad = { l: 10, r: 10, t: 28, b: 34 };
+        ctx.fillStyle = css("--mute");
+        ctx.font = "12px system-ui";
+        ctx.fillText("Energy (J), zero of gravity PE at spring top", pad.l, 16);
+        const Y = (v) =>
+          h - pad.b - ((v - lo) / (hi - lo)) * (h - pad.t - pad.b);
+        const bw = (w - pad.l - pad.r) / bars.length;
+        bars.forEach(([name, v, col], i) => {
+          ctx.fillStyle = col;
+          const x = pad.l + i * bw + bw * 0.15,
+            y0 = Y(0),
+            y1 = Y(v);
+          ctx.fillRect(x, Math.min(y0, y1), bw * 0.7, Math.abs(y1 - y0));
+          ctx.fillStyle = css("--mute");
+          ctx.textAlign = "center";
+          ctx.fillText(name, x + bw * 0.35, h - 18);
+          ctx.fillText(v.toFixed(2), x + bw * 0.35, h - 5);
+        });
+        ctx.textAlign = "left";
+        ctx.strokeStyle = css("--grid");
+        ctx.beginPath();
+        ctx.moveTo(pad.l, Y(0));
+        ctx.lineTo(w - pad.r, Y(0));
+        ctx.stroke();
+      }
+
+      function readout() {
+        $("rt").textContent = st.t.toFixed(2) + " s";
+        $("ry").textContent = st.y.toFixed(3) + " m";
+        $("rv").textContent = st.v.toFixed(2) + " m/s";
+        $("ro").textContent = maxComp.toFixed(3) + " m";
+      }
+
+      function frame(now) {
+        const dt = Math.min((now - last) / 1000, 0.05);
+        last = now;
+        if (running) {
+          // carry leftover time between frames so sim time tracks wall time x speed
+          acc += dt * p.s;
+          while (acc >= DT) {
+            step();
+            acc -= DT;
+          }
+          const cut = hist.findIndex((q) => q[0] >= st.t - WIN);
+          if (cut > 0) hist.splice(0, cut);
+        }
+        readout();
+        drawScene();
+        drawPlot();
+        drawEnergy();
+        requestAnimationFrame(frame);
+      }
+
+      ["m", "k", "h", "g"].forEach((id) =>
+        $(id).addEventListener("input", reset),
+      );
+      $("s").addEventListener("input", readParams);
+      $("reset").onclick = () => {
+        reset();
+        running = true;
+        $("play").textContent = "Pause";
+      };
+      $("play").onclick = () => {
+        running = !running;
+        $("play").textContent = running ? "Pause" : "Play";
+      };
+
+      reset();
+      requestAnimationFrame((t) => {
+        last = t;
+        frame(t);
+      });
+    </script>
+  </body>
+</html>

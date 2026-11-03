@@ -213,7 +213,7 @@
 
       function reset() {
         readParams();
-        st = { t: 0, y: p.h, v: 0, n: 0 };
+        st = { t: 0, y: p.h, v: 0, a: accel(p.h), n: 0 };
         hist = [[0, p.h]];
         maxComp = 0;
         acc = 0;
@@ -235,16 +235,18 @@
         $("rp").textContent = (contact + flight).toFixed(3) + " s";
       }
 
-      function accel(y, v) {
+      function accel(y) {
         let a = -p.g;
         if (y < 0) a += (-p.k * y) / p.m; // spring pushes only while pressed (y<0)
         return a;
       }
 
       function step() {
-        // semi-implicit Euler: stable for oscillators at this DT
-        st.v += accel(st.y, st.v) * DT;
-        st.y += st.v * DT;
+        // velocity Verlet: keeps y and v in sync, so displayed energy stays accurate
+        st.y += st.v * DT + 0.5 * st.a * DT * DT;
+        const a1 = accel(st.y);
+        st.v += 0.5 * (st.a + a1) * DT;
+        st.a = a1;
         st.t += DT;
         st.n++;
         if (-st.y > maxComp) maxComp = -st.y;
@@ -276,6 +278,18 @@
       const css = (n) =>
         getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
+      // tick values on a 1/2/5 x 10^n step, about n ticks across [lo, hi], plus label decimals
+      function niceTicks(lo, hi, n) {
+        const raw = (hi - lo) / n,
+          mag = 10 ** Math.floor(Math.log10(raw)),
+          step = [1, 2, 5, 10].map((f) => f * mag).find((s) => s >= raw),
+          dec = Math.max(0, -Math.floor(Math.log10(step))),
+          ticks = [];
+        for (let i = Math.ceil(lo / step); i * step <= hi + 1e-9; i++)
+          ticks.push(i * step);
+        return { ticks, dec };
+      }
+
       function drawScene() {
         const { ctx, w, h } = fit($("scene"));
         ctx.clearRect(0, 0, w, h);
@@ -293,12 +307,8 @@
         ctx.fillStyle = css("--mute");
         ctx.font = "11px system-ui";
         ctx.lineWidth = 1;
-        const raw = (top - bot) / 8,
-          mag = 10 ** Math.floor(Math.log10(raw)),
-          stepM = [1, 2, 5, 10].map((f) => f * mag).find((s) => s >= raw),
-          dec = Math.max(0, -Math.floor(Math.log10(stepM)));
-        for (let i = Math.ceil(bot / stepM); i * stepM <= top + 1e-9; i++) {
-          const v = i * stepM;
+        const { ticks, dec } = niceTicks(bot, top, 8);
+        for (const v of ticks) {
           ctx.beginPath();
           ctx.moveTo(36, Y(v));
           ctx.lineTo(w, Y(v));
@@ -364,13 +374,13 @@
           pad.l + ((t - xr[0]) / (xr[1] - xr[0])) * (w - pad.l - pad.r);
         const Y = (v) =>
           h - pad.b - ((v - yr[0]) / (yr[1] - yr[0])) * (h - pad.t - pad.b);
-        for (let i = 0; i <= 4; i++) {
-          const v = yr[0] + ((yr[1] - yr[0]) * i) / 4;
+        const { ticks, dec } = niceTicks(yr[0], yr[1], 6);
+        for (const v of ticks) {
           ctx.beginPath();
           ctx.moveTo(pad.l, Y(v));
           ctx.lineTo(w - pad.r, Y(v));
           ctx.stroke();
-          ctx.fillText(v.toFixed(2), 4, Y(v) + 4);
+          ctx.fillText(v.toFixed(dec), 4, Y(v) + 4);
         }
         if (yr[0] < 0 && yr[1] > 0) {
           ctx.strokeStyle = css("--warn");
@@ -401,7 +411,7 @@
           "Height of mass above spring top (m)",
           [t0, t1],
           [ylo, yhi],
-          { l: 44, r: 10, t: 24, b: 22 },
+          { l: 58, r: 10, t: 24, b: 22 },
         );
         ctx.strokeStyle = css("--acc");
         ctx.lineWidth = 2;
